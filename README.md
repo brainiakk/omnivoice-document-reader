@@ -1,322 +1,97 @@
-# OmniVoice 🌍
+# OmniVoice Document Reader
 
-<p align="center">
-  <img width="200" height="200" alt="OmniVoice" src="https://zhu-han.github.io/omnivoice/pics/omnivoice.jpg" />
-</p>
+A local document reader that synthesizes full-length documents in your own voice — or any built-in voice — sentence by sentence, with real-time highlighting and seamless browser playback.
 
-<p align="center">
-  <a href="https://huggingface.co/k2-fsa/OmniVoice"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-FFD21E" alt="Hugging Face Model"></a>
-  &nbsp;
-  <a href="https://huggingface.co/spaces/k2-fsa/OmniVoice"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Space-blue" alt="Hugging Face Space"></a>
-  &nbsp;
-  <a href="https://arxiv.org/abs/2604.00688"><img src="https://img.shields.io/badge/arXiv-Paper-B31B1B.svg"></a>
-  &nbsp;
-  <a href="https://zhu-han.github.io/omnivoice"><img src="https://img.shields.io/badge/GitHub.io-Demo_Page-blue?logo=GitHub&style=flat-square"></a>
-  &nbsp;
-  <a href="https://colab.research.google.com/github/k2-fsa/OmniVoice/blob/master/docs/OmniVoice.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"></a>
-</p>
-
-OmniVoice is a state-of-the-art massively multilingual zero-shot text-to-speech (TTS) model supporting over 600 languages. Built on a novel diffusion language model-style architecture, it generates high-quality speech with superior inference speed, supporting voice cloning and voice design.
-
-**Contents**: [Key Features](#key-features) | [Installation](#installation) | [Quick Start](#quick-start) | [Python API](#python-api) | [Command-Line Tools](#command-line-tools) | [Training & Evaluation](#training--evaluation) | [Discussion](#discussion--communication) | [Citation](#citation)
-
-## Key Features
-
-- **600+ Languages Supported**: The broadest language coverage among zero-shot TTS models ([full list](docs/languages.md)).
-- **Voice Cloning**: State-of-the-art voice cloning quality.
-- **Voice Design**: Control voices via assigned speaker attributes (gender, age, pitch, dialect/accent, whisper, etc.).
-- **Fine-grained Control**: Non-verbal symbols (e.g., `[laughter]`) and pronunciation correction via pinyin or phonemes.
-- **Fast Inference**: RTF as low as 0.025 (40x faster than real-time).
-- **Diffusion Language Model-style Architecture**: A clean, streamlined, and scalable design that delivers both quality and speed.
+Built on top of [OmniVoice](https://github.com/k2-fsa/OmniVoice) — the original model repo by k2-fsa.
 
 ---
 
-## Installation
+## What it does
 
-Choose **one** of the following methods: **pip** or **uv**.
+- Upload a PDF, DOCX, Markdown, or plain-text document
+- Choose a TTS engine: **OmniVoice** (zero-shot voice cloning, 600+ languages) or **Supertonic 3** (9 built-in voices, 31 languages)
+- Hit Play — audio streams sentence-pair by sentence-pair as it generates
+- The browser player grows seamlessly as new audio is appended; playback never restarts from zero
+- The document view highlights the current sentences and marks completed ones
+- A progress bar tracks overall position through the document
+- Pause/Resume/Stop all work mid-generation
 
-### pip
+---
 
-> We recommend using a fresh virtual environment (e.g., `conda`, `venv`, etc.) to avoid conflicts.
+## Requirements
 
-**Step 1**: Install PyTorch
+```
+pip install omnivoice fastapi uvicorn soundfile python-dotenv elevenlabs nltk
+pip install pymupdf python-docx          # PDF and DOCX parsing
+```
 
-<details>
-<summary>NVIDIA GPU</summary>
+You also need:
+- `./model/` — local OmniVoice model weights (downloaded from HuggingFace `k2-fsa/OmniVoice`)
+- `./supertonic3/` — Supertonic 3 ONNX model directory (optional; Supertonic tab is hidden if missing)
+- A `.env` file with `ELEVENLABS_API_KEY=...` if you want automatic reference audio transcription
+
+---
+
+## server.py — Main app
+
+`server.py` is the primary application. It serves a full browser UI and streams generated audio over WebSocket.
 
 ```bash
-# Install pytorch with your CUDA version, e.g.
-pip install torch==2.8.0+cu128 torchaudio==2.8.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
+python server.py
+# then open http://localhost:7860
 ```
-> See [PyTorch official site](https://pytorch.org/get-started/locally/) for other versions installation.
 
-</details>
+### How to use it
 
-<details>
-<summary>Apple Silicon</summary>
+1. **Choose engine** — OmniVoice for voice cloning, Supertonic for built-in voices
+2. **OmniVoice — Voice Clone mode**: upload a 3–10 second WAV of the voice you want to clone. The app calls ElevenLabs Scribe v2 to auto-transcribe it; you can also type the transcript manually.
+3. **OmniVoice — Voice Design mode**: check "Voice Design Mode" and type a description like `female, young adult, american accent, moderate pitch`. No reference audio needed.
+4. **Supertonic**: pick a speaker (M1–M4, F1–F5) and language from the dropdowns.
+5. **Upload a document** (PDF, DOCX, .md, or .txt).
+6. **Press Play** — audio starts generating and playing immediately.
+
+Generated audio is saved incrementally under `outputs/<doc>_<voice>/`. Each session ends with a `session_final.wav` containing the full document audio.
+
+### server.py architecture
+
+| Section | What it does |
+|---|---|
+| **1 — Model loading** | Loads OmniVoice from `./model` at startup using MPS (Apple Silicon) with `bfloat16`. Attempts to load Supertonic 3 from `./supertonic3`; gracefully disables it if the directory is missing or import fails. |
+| **2 — Document parsing** | `parse_pdf`, `parse_docx`, `parse_markdown` each walk their respective format and return a list of `DocBlock` objects tagged as `h1/h2/h3/p`. `assign_sentences` runs NLTK sentence tokenization over all paragraph blocks, assigning each sentence a flat global index. `build_doc_html` renders the blocks to HTML with `<span id="s-N">` tags on each sentence for live highlighting. |
+| **3 — Audio generation** | `gen_omni` calls `omni_tts.generate()` with either a reference clip (voice clone) or an `instruct` string (voice design). `gen_supertonic` calls `st_tts.get_voice_style(voice)` then `st_tts.synthesize()`. `_normalise` converts any torch Tensor or int16 array to a float32 mono numpy array. `transcribe_elevenlabs` sends a WAV to ElevenLabs Scribe v2 and returns the transcript string. |
+| **4 — Session state** | Module-level globals hold the current document sentences, parsed blocks, file paths, and two threading primitives: `_stop_flag` (Event) to abort generation, and `_playback_event` (Event) to pause/resume the producer thread. |
+| **5 — FastAPI app** | A single `FastAPI()` instance. The `outputs/` directory is mounted as a static file server so the browser can fetch WAV files directly via `/outputs/...` URLs. |
+| **6 — HTML page** | The entire UI is a single self-contained HTML string (`_HTML_TEMPLATE`) injected with the language list at startup. It contains: a sidebar with engine/voice/document controls; a document viewer with sentence spans; a progress bar; and a persistent `<audio id="player">` element. The JS `loadAudio(url, duration)` function handles every audio update — it captures the current playback position before swapping `src`, then restores it on the `canplay` event using `fastSeek`. The `userPaused` flag ensures that a natural audio-end triggers auto-resume on the next chunk, but a manual Pause click does not. |
+| **7 — Routes** | `GET /` returns the HTML page. `POST /upload/doc` saves the file to a temp path, parses it, stores sentences globally, and returns rendered HTML + sentence count. `POST /upload/ref` saves the WAV, triggers ElevenLabs transcription, and returns the transcript. |
+| **8 — WebSocket `/ws`** | Accepts one persistent connection per page load. Dispatches `play` messages by spinning a daemon thread running `_generate` and relaying its output messages back over the socket. `pause` and `resume` toggle `_playback_event`. `stop` sets `_stop_flag` and unblocks `_playback_event` so the producer thread can exit cleanly. |
+| **9 — Generation `_generate`** | Validates engine/document/voice state, then launches a **producer thread** that iterates sentence pairs (2 sentences per chunk), calls the selected TTS function, writes each pair to `pair_NNNN.wav`, and puts it on a bounded `queue.Queue(maxsize=2)`. The main thread (consumer) reads from the queue, concatenates all parts so far into a growing `session_NNNN.wav`, deletes the previous session file, and sends three WebSocket messages per chunk: `audio_update` (new URL + duration), `highlight` (sentence indices + progress %), and `status` (human-readable pair counter). Between chunks the consumer sleeps for the pair's audio duration while printing live position to the terminal. On stop or completion, the latest session file is copied to `session_final.wav`. |
+| **10 — Entry point** | `uvicorn.run(server, host="0.0.0.0", port=7860)` |
+
+---
+
+## main.py — Quick single-file test
+
+`main.py` is a standalone script for testing OmniVoice generation directly, without the server or browser.
 
 ```bash
-pip install torch==2.8.0 torchaudio==2.8.0
+python main.py
 ```
 
-</details>
+It loads the model from `./model`, generates a French sentence in the voice from `austin.wav`, and writes the result to `clone_out.wav`. Edit the `text` and `ref_audio` arguments at the bottom of the file to test different inputs.
 
-**Step 2**: Install OmniVoice (choose one)
-
-```bash
-# From PyPI (stable release)
-pip install omnivoice
-
-# From the latest source on GitHub (no need to clone)
-pip install git+https://github.com/k2-fsa/OmniVoice.git
-
-# For development (clone first, editable install)
-git clone https://github.com/k2-fsa/OmniVoice.git
-cd OmniVoice
-pip install -e .
-```
-
-### uv
-
-Clone the repository and sync dependencies:
-
-```bash
-git clone https://github.com/k2-fsa/OmniVoice.git
-cd OmniVoice
-uv sync
-```
-
-> **Tip**: Can use mirror with `uv sync --default-index "https://mirrors.aliyun.com/pypi/simple"`
+This file is not part of the document reader — it is a development/testing utility.
 
 ---
 
-## Quick Start
+## Output files
 
-Try OmniVoice without coding:
-
-- Launch the local web UI: `omnivoice-demo --ip 0.0.0.0 --port 8001`
-
-- Or try it directly on [HuggingFace Space](https://huggingface.co/spaces/k2-fsa/OmniVoice)
-
-- Or run it in Google Colab: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/k2-fsa/OmniVoice/blob/master/docs/OmniVoice.ipynb)
-
-> If you have trouble connecting to HuggingFace when downloading the pre-trained models, set `export HF_ENDPOINT="https://hf-mirror.com"` before running.
-
-For full usage, see the [Python API](#python-api) and [Command-Line Tools](#command-line-tools) sections below.
-
----
-
-## Python API
-
-OmniVoice supports three generation modes. All features in this section are also available via [command-line tools](#command-line-tools).
-
-### Voice Cloning
-
-Clone a voice from a short reference audio. Provide `ref_audio` and `ref_text`:
-
-```python
-from omnivoice import OmniVoice
-import soundfile as sf
-import torch
-
-model = OmniVoice.from_pretrained(
-    "k2-fsa/OmniVoice",
-    device_map="cuda:0",
-    dtype=torch.float16
-)
-# Apple Silicon users: use device_map="mps" instead
-
-audio = model.generate(
-    text="Hello, this is a test of zero-shot voice cloning.",
-    ref_audio="ref.wav",
-    ref_text="Transcription of the reference audio.",
-) # audio is a list of `np.ndarray` with shape (T,) at 24 kHz.
-
-# If you don't want to input `ref_text` manually, you can directly omit the `ref_text`.
-# The model will use Whisper ASR to auto-transcribe it.
-
-sf.write("out.wav", audio[0], 24000)
+```
+outputs/
+  <doc_stem>_<voice_stem>/
+    pair_0000.wav          # individual sentence-pair clips
+    pair_0001.wav
+    ...
+    session_final.wav      # full session — the complete document audio
 ```
 
-> **Tips**
->
-> - Use a 3–10 seconds reference audio clip. Longer audio slows down inference and may degrade cloning quality.
-> - For standard pronunciation, use a reference audio in the **same language** as the target speech. In cross-lingual voice cloning (i.e., the reference audio and target speech are in different languages), the generated speech will carry an accent from the reference audio's language.
-> - For better results with Arabic numerals, normalize them to words first (e.g., "123" → "one hundred twenty-three") with text normalization tools (e.g., [WeTextProcessing](https://github.com/wenet-e2e/WeTextProcessing)).
->
-> For more tips, see [docs/tips.md](docs/tips.md).
-
-### Voice Design
-
-Describe the desired voice with speaker attributes — no reference audio needed.
-Supported attributes: **gender** (male/female), **age** (child to elderly),
-**pitch** (very low to very high), **style** (whisper), **English accent**
-(American, British, etc.), and **Chinese dialect** (四川话, 陕西话, etc.).
-Attributes are comma-separated and freely combinable across categories.
-
-```python
-audio = model.generate(
-    text="Hello, this is a test of zero-shot voice design.",
-    instruct="female, low pitch, british accent",
-)
-```
-
-> **Note**: Voice design was trained on Chinese and English data only. It can generalize to other languages, but results can be unstable for some low-resource languages.
-
-See [docs/voice-design.md](docs/voice-design.md) for the full attribute
-reference, Chinese equivalents, and usage tips.
-
-### Auto Voice
-
-Let the model choose a voice automatically:
-
-```python
-audio = model.generate(text="This is a sentence without any voice prompt.")
-```
-
-### Generation Parameters
-
-All above three modes share the same `model.generate()` API. You can further control the generation behavior via keyword arguments:
-
-```python
-audio = model.generate(
-    text="...",
-    num_step=32,  # diffusion steps (or 16 for faster inference)
-    speed=1.0,     # speed factor (>1.0 faster, <1.0 slower)
-    duration=10.0, # fixed output duration in seconds (overrides speed)
-    # ... more options
-)
-```
-See more detailed control in [docs/generation-parameters.md](docs/generation-parameters.md).
-
-### Non-Verbal & Pronunciation Control
-
-OmniVoice supports inline **non-verbal symbols** and **pronunciation correction** within the input text.
-
-**Non-verbal symbols**: Insert tags like `[laughter]` directly in the text to add expressive non-verbal sounds.
-
-```python
-audio = model.generate(text="[laughter] You really got me. I didn't see that coming at all.")
-```
-
-Supported tags: `[laughter]`, `[sigh]`, `[confirmation-en]`, `[question-en]`, `[question-ah]`, `[question-oh]`, `[question-ei]`, `[question-yi]`, `[surprise-ah]`, `[surprise-oh]`, `[surprise-wa]`, `[surprise-yo]`, `[dissatisfaction-hnn]`.
-
-**Pronunciation control (Chinese)**: Use pinyin with tone numbers to correct specific character pronunciations.
-
-```python
-audio = model.generate(text="这批货物打ZHE2出售后他严重SHE2本了，再也经不起ZHE1腾了。")
-```
-
-**Pronunciation control (English)**: Use [CMU pronunciation dictionary](https://svn.code.sf.net/p/cmusphinx/code/trunk/cmudict/cmudict.0.7a)  (uppercase, in brackets) to override default English pronunciations.
-
-```python
-audio = model.generate(text="He plays the [B EY1 S] guitar while catching a [B AE1 S] fish.")
-```
-
----
-
-## Command-Line Tools
-
-Three CLI entry points are provided. The CLI tools support all features available in the Python API (voice cloning, voice design, auto voice, generation parameters, etc.) — all controlled via command-line arguments.
-
-| Command | Description | Source |
-|---|---|---|
-| `omnivoice-demo` | Interactive Gradio web demo | [omnivoice/cli/demo.py](omnivoice/cli/demo.py) |
-| `omnivoice-infer` | Single-item inference | [omnivoice/cli/infer.py](omnivoice/cli/infer.py) |
-| `omnivoice-infer-batch` | Batch inference across multiple GPUs | [omnivoice/cli/infer_batch.py](omnivoice/cli/infer_batch.py) |
-
-### Demo
-
-```bash
-omnivoice-demo --ip 0.0.0.0 --port 8001
-```
-
-Provides a web UI for voice cloning and voice design. See `omnivoice-demo --help` for all options.
-
-### Single Inference
-
-```bash
-# Voice Cloning
-# ref_text can be omitted (Whisper will auto-transcribe ref_audio to get it).
-omnivoice-infer \
-    --model k2-fsa/OmniVoice \
-    --text "This is a test for text to speech." \
-    --ref_audio ref.wav \
-    --ref_text "Transcription of the reference audio." \
-    --output hello.wav
-
-# Voice Design
-omnivoice-infer --model k2-fsa/OmniVoice \
-    --text "This is a test for text to speech." \
-    --instruct "male, British accent" \
-    --output hello.wav
-
-# Auto Voice
-omnivoice-infer \
-    --model k2-fsa/OmniVoice \
-    --text "This is a test for text to speech."\
-    --output hello.wav
-```
-
-### Batch Inference
-
-`omnivoice-infer-batch` can distribute batch inference across multiple GPUs, designed for large-scale TTS tasks.
-
-```bash
-omnivoice-infer-batch \
-    --model k2-fsa/OmniVoice \
-    --test_list test.jsonl \
-    --res_dir results/
-```
-
-The test list is a JSONL file where each line is a JSON object:
-```json
-{"id": "sample_001", "text": "Hello world", "ref_audio": "/path/to/ref.wav", "ref_text": "Reference transcript", "instruct": "female, british accent", "language_id": "en", "duration": 10.0, "speed": 1.0}
-```
-Only `id` and `text` are mandatory fields. `ref_audio` and `ref_text` are used in voice cloning mode. `instruct` is used in voice design mode. If no reference audio or instruct are provided, the model will generate text in a random voice.
-
-`language_id`, `duration`, and `speed` are optional. `duration` (in seconds) fixes the output length; `speed` controls the speaking rate. If `duration` and `speed` are both provided, `speed` will be ignored.
-
----
-
-## Training & Evaluation
-
-See [examples/](examples/) for the complete pipeline — from data preparation to training, evaluation, and finetuning.
-
----
-
-## Discussion & Communication
-
-You can directly discuss on [GitHub Issues](https://github.com/k2-fsa/OmniVoice/issues).
-
-You can also scan the QR code to join our wechat group or follow our wechat official account.
-
-| Wechat Group | Wechat Official Account |
-| ------------ | ----------------------- |
-|![wechat](https://k2-fsa.org/zh-CN/assets/pic/wechat_group.jpg) |![wechat](https://k2-fsa.org/zh-CN/assets/pic/wechat_account.jpg) |
-
----
-
-## Community Projects
-
-OmniVoice is supported by a growing ecosystem of community projects.
-Explore them in [Community Projects](docs/community-projects.md).
-
----
-
-## Citation
-
-```bibtex
-@article{zhu2026omnivoice,
-      title={OmniVoice: Towards Omnilingual Zero-Shot Text-to-Speech with Diffusion Language Models},
-      author={Zhu, Han and Ye, Lingxuan and Kang, Wei and Yao, Zengwei and Guo, Liyong and Kuang, Fangjun and Han, Zhifeng and Zhuang, Weiji and Lin, Long and Povey, Daniel},
-      journal={arXiv preprint arXiv:2604.00688},
-      year={2026}
-}
-```
-
----
-
-## Disclaimer
-
-Users are strictly prohibited from using this model for unauthorized voice cloning, voice impersonation, fraud, scams, or any other illegal or unethical activities. All users shall ensure full compliance with applicable local laws, regulations, and ethical standards. The developers assume no liability for any misuse of this model and advocate for responsible AI development and use, encouraging the community to uphold safety and ethical principles in AI research and applications.
+Old session files are deleted as new ones are written to keep disk usage low. Only `session_final.wav` persists after a completed run.
